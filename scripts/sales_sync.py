@@ -1,0 +1,375 @@
+"""Read-only Dynamics GP extractor for the Structural Fab Sales dashboard."""
+from __future__ import annotations
+
+import argparse
+import ctypes
+import datetime as dt
+import hashlib
+import json
+import os
+from collections import defaultdict
+from ctypes import wintypes
+from pathlib import Path
+from typing import Any, Iterable, Mapping
+
+import pyodbc
+
+CREDENTIAL_TARGET = "Hermes/ARCRM/SMI-SQL"
+SERVER = "192.168.1.25,49934"
+DATABASE = "SFAB"
+SOURCE = "dbo.SalesTransactions"
+YEARS = (2024, 2025, 2026)
+
+TRANSACTION_SQL = """
+WITH transactions AS (
+  SELECT
+    LTRIM(RTRIM([SOP Number])) AS sop,
+    CAST([Document Date] AS date) AS document_date,
+    LTRIM(RTRIM([Customer Name])) AS customer,
+    LTRIM(RTRIM([Salesperson ID])) AS salesperson,
+    LTRIM(RTRIM([Location Code])) AS location,
+    CAST([Subtotal] AS float) AS sales,
+    CAST([Extended Cost] AS float) AS extended_cost,
+    LTRIM(RTRIM([SOP Type])) AS kind,
+    ROW_NUMBER() OVER (
+      PARTITION BY [SOP Type], [SOP Number]
+      ORDER BY [Document Date] DESC, [Posted Date] DESC
+    ) AS rn
+  FROM dbo.SalesTransactions
+  WHERE [SOP Type] IN ('Invoice', 'Return')
+    AND [Posting Status] = 'Posted'
+    AND [Void Status] = 'Normal'
+    AND [Document Date] >= '2024-01-01'
+    AND [Document Date] < DATEADD(day, 1, CAST(GETDATE() AS date))
+)
+SELECT sop, document_date, customer, salesperson, location, sales, extended_cost, kind
+FROM transactions WHERE rn = 1
+ORDER BY document_date, sop
+"""
+
+OPEN_ORDER_SQL = """
+WITH orders AS (
+  SELECT
+    LTRIM(RTRIM([SOP Number])) AS sop,
+    LTRIM(RTRIM([Salesperson ID])) AS salesperson,
+    LTRIM(RTRIM([Location Code])) AS location,
+    CAST([Remaining Subtotal] AS float) AS amount,
+    ROW_NUMBER() OVER (
+      PARTITION BY [SOP Number]
+      ORDER BY [Document Date] DESC, [Modified Date] DESC
+    ) AS rn
+  FROM dbo.SalesTransactions
+  WHERE [SOP Type] = 'Order'
+    AND [Posting Status] = 'Unposted'
+    AND [Void Status] = 'Normal'
+)
+SELECT sop, salesperson, location, amount
+FROM orders WHERE rn = 1 AND amount > 0
+ORDER BY sop
+"""
+
+
+class _CredentialW(ctypes.Structure):
+    _fields_ = [
+        ("Flags", wintypes.DWORD), ("Type", wintypes.DWORD),
+        ("TargetName", wintypes.LPWSTR), ("Comment", wintypes.LPWSTR),
+        ("LastWritten", wintypes.FILETIME), ("CredentialBlobSize", wintypes.DWORD),
+        ("CredentialBlob", ctypes.POINTER(ctypes.c_ubyte)), ("Persist", wintypes.DWORD),
+        ("AttributeCount", wintypes.DWORD), ("Attributes", ctypes.c_void_p),
+        ("TargetAlias", wintypes.LPWSTR), ("UserName", wintypes.LPWSTR),
+    ]
+
+
+def read_windows_credential(target: str = CREDENTIAL_TARGET) -> tuple[str, str]:
+    if os.name != "nt":
+        raise RuntimeError("Windows Credential Manager is required")
+    api = ctypes.WinDLL("Advapi32.dll")
+    pointer = ctypes.POINTER(_CredentialW)()
+    if not api.CredReadW(target, 1, 0, ctypes.byref(pointer)):
+        raise RuntimeError(f"Credential not found: {target}")
+    try:
+        cred = pointer.contents
+        user = cred.UserName or ""
+        password = ctypes.wstring_at(cred.CredentialBlob, cred.CredentialBlobSize // 2)
+    finally:
+        api.CredFree(pointer)
+    if not user or not password:
+        raise RuntimeError("SQL credential is incomplete")
+    return user, password
+
+
+def connect() -> pyodbc.Connection:
+    user, password = read_windows_credential()
+    try:
+        return pyodbc.connect(
+            "DRIVER={SQL Server};"
+            f"SERVER={SERVER};DATABASE={DATABASE};UID={user};PWD={password};"
+            "Encrypt=no;TrustServerCertificate=yes;APP=Hermes SFAB Sales Read Only;",
+            timeout=15,
+        )
+    finally:
+        password = ""
+
+
+def choose_period_start(period: str, as_of: dt.date) -> dt.date:
+    if period == "1M":
+        return as_of - dt.timedelta(days=29)
+    if period == "YTD":
+        return dt.date(as_of.year, 1, 1)
+    if period == "FULL":
+        return dt.date(min(YEARS), 1, 1)
+    raise ValueError(f"Unsupported period: {period}")
+
+
+def _date(value: Any) -> dt.date:
+    if isinstance(value, dt.datetime):
+        return value.date()
+    if isinstance(value, dt.date):
+        return value
+    return dt.date.fromisoformat(str(value)[:10])
+
+
+def normalize_transaction(row: Mapping[str, Any]) -> dict[str, Any]:
+    kind = str(row.get("kind") or "Invoice").strip().title()
+    sign = -1 if kind == "Return" else 1
+    sales_magnitude = abs(round(float(row.get("sales") or 0), 2))
+    raw_cost_value = row.get("extended_cost") if row.get("extended_cost") is not None else row.get("cost")
+    raw_cost = abs(float(raw_cost_value or 0))
+    cost_magnitude = sales_magnitude * 0.10 if raw_cost > sales_magnitude else raw_cost
+    sales = sign * sales_magnitude
+    cost = sign * round(cost_magnitude, 2)
+    return {
+        "sop": str(row.get("sop") or "").strip(),
+        "date": _date(row.get("date") or row.get("document_date")),
+        "customer": str(row.get("customer") or "Unknown").strip() or "Unknown",
+        "salesperson": str(row.get("salesperson") or "Unassigned").strip() or "Unassigned",
+        "location": str(row.get("location") or "Unassigned").strip() or "Unassigned",
+        "kind": kind,
+        "sales": sales,
+        "cost": cost,
+        "profit": round(sales - cost, 2),
+    }
+
+
+def normalize_invoice(row: Mapping[str, Any]) -> dict[str, Any]:
+    return normalize_transaction({**row, "kind": "Invoice"})
+
+
+def _totals(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    rows = list(rows)
+    invoices = [r for r in rows if r.get("kind", "Invoice") != "Return"]
+    returns = [r for r in rows if r.get("kind") == "Return"]
+    return {
+        "sales": round(sum(float(r["sales"]) for r in rows), 2),
+        "gross_sales": round(sum(float(r["sales"]) for r in invoices), 2),
+        "returns": round(abs(sum(float(r["sales"]) for r in returns)), 2),
+        "cost": round(sum(float(r["cost"]) for r in rows), 2),
+        "profit": round(sum(float(r["profit"]) for r in rows), 2),
+        "invoices": len({str(r["sop"]) for r in invoices}),
+        "return_docs": len({str(r["sop"]) for r in returns}),
+        "customers": len({str(r["customer"]) for r in rows}),
+    }
+
+
+def _rank(rows: list[dict[str, Any]], key: str, limit: int | None = None) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        groups[str(row[key])].append(row)
+    ranked = [{"name": name, **_totals(items)} for name, items in groups.items()]
+    ranked.sort(key=lambda item: (-item["sales"], item["name"]))
+    return ranked[:limit] if limit else ranked
+
+
+def _safe_prior(date: dt.date) -> dt.date:
+    try:
+        return date.replace(year=date.year - 1)
+    except ValueError:
+        return date.replace(year=date.year - 1, day=28)
+
+
+def _ranking_bundle(period_rows: list[dict[str, Any]], prior_rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    customers = _rank(period_rows, "customer", 25)
+    if prior_rows is not None:
+        prior_by_name = {item["name"]: item["sales"] for item in _rank(prior_rows, "customer")}
+        for customer in customers:
+            customer["prior_sales"] = prior_by_name.get(customer["name"], 0.0)
+    return {
+        "salespeople": _rank(period_rows, "salesperson"),
+        "branches": _rank(period_rows, "location"),
+        "customers": customers,
+    }
+
+
+def _salesperson_details(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    by_person: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        by_person[row["salesperson"]].append(row)
+    details: dict[str, Any] = {}
+    for name, person_rows in by_person.items():
+        monthly = []
+        for (year, month) in sorted({(r["date"].year, r["date"].month) for r in person_rows}):
+            selected = [r for r in person_rows if r["date"].year == year and r["date"].month == month]
+            monthly.append({"year": year, "month": month, **_totals(selected)})
+        details[name] = {
+            "total": _totals(person_rows),
+            "monthly": monthly,
+            "customers": _rank(person_rows, "customer", 20),
+        }
+    return details
+
+
+def _customer_details(rows: list[dict[str, Any]], included_names: set[str]) -> dict[str, Any]:
+    by_customer: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        if row["customer"] in included_names:
+            by_customer[row["customer"]].append(row)
+    details: dict[str, Any] = {}
+    for name, customer_rows in by_customer.items():
+        monthly = []
+        for (year, month) in sorted({(r["date"].year, r["date"].month) for r in customer_rows}):
+            selected = [r for r in customer_rows if r["date"].year == year and r["date"].month == month]
+            monthly.append({"year": year, "month": month, **_totals(selected)})
+        details[name] = {
+            "total": _totals(customer_rows),
+            "monthly": monthly,
+            "salespeople": _rank(customer_rows, "salesperson", 20),
+        }
+    return details
+
+
+def _customer_comparison(current: list[dict[str, Any]], prior: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    current_by_name = {item["name"]: item for item in _rank(current, "customer")}
+    result = []
+    for prior_item in _rank(prior, "customer", 25):
+        current_item = current_by_name.get(prior_item["name"], {})
+        result.append({
+            "name": prior_item["name"],
+            "prior_sales": prior_item["sales"],
+            "current_sales": current_item.get("sales", 0),
+            "prior_profit": prior_item["profit"],
+            "current_profit": current_item.get("profit", 0),
+            "prior_invoices": prior_item["invoices"],
+            "current_invoices": current_item.get("invoices", 0),
+        })
+    return result
+
+
+def build_snapshot(rows: Iterable[Mapping[str, Any]], as_of: dt.date | None = None) -> dict[str, Any]:
+    as_of = as_of or dt.date.today()
+    unique: dict[str, dict[str, Any]] = {}
+    for source in rows:
+        row = normalize_transaction(source)
+        key = f'{row["kind"]}:{row["sop"]}'
+        if row["sop"] and row["date"] <= as_of:
+            unique[key] = row
+    transactions = list(unique.values())
+    years = {str(year): _totals([r for r in transactions if r["date"].year == year]) for year in YEARS}
+    monthly = []
+    months: dict[str, Any] = {}
+    for year in YEARS:
+        for month in range(1, 13):
+            current = [r for r in transactions if r["date"].year == year and r["date"].month == month]
+            prior = [r for r in transactions if r["date"].year == year - 1 and r["date"].month == month]
+            total = _totals(current)
+            monthly.append({"year": year, "month": month, **total})
+            months[f"{year}-{month:02d}"] = {
+                "current": total,
+                "prior": _totals(prior),
+                "rankings": _ranking_bundle(current, prior),
+                "prior_rankings": _ranking_bundle(prior),
+                "customer_comparison": _customer_comparison(current, prior),
+            }
+    rolling_start = choose_period_start("1M", as_of)
+    rolling = [r for r in transactions if rolling_start <= r["date"] <= as_of]
+    prior_rolling_start, prior_as_of = _safe_prior(rolling_start), _safe_prior(as_of)
+    prior_rolling = [r for r in transactions if prior_rolling_start <= r["date"] <= prior_as_of]
+    ytd = [r for r in transactions if r["date"].year == as_of.year and r["date"] <= as_of]
+    prior_ytd = [r for r in transactions if dt.date(as_of.year - 1, 1, 1) <= r["date"] <= prior_as_of]
+    full = transactions
+    comparisons = {
+        "1M": {"current": _totals(rolling), "prior": _totals(prior_rolling), "prior_rankings": _ranking_bundle(prior_rolling), "customer_comparison": _customer_comparison(rolling, prior_rolling)},
+        "YTD": {"current": _totals(ytd), "prior": _totals(prior_ytd), "prior_rankings": _ranking_bundle(prior_ytd), "customer_comparison": _customer_comparison(ytd, prior_ytd)},
+        "FULL": {"current": _totals(ytd), "prior": _totals(prior_ytd), "prior_rankings": _ranking_bundle(prior_ytd), "customer_comparison": _customer_comparison(ytd, prior_ytd)},
+    }
+    period_rankings = {"1M": _ranking_bundle(rolling, prior_rolling), "YTD": _ranking_bundle(ytd, prior_ytd), "FULL": _ranking_bundle(full)}
+    detail_customers: set[str] = set()
+    for month_data in months.values():
+        for group in (month_data["rankings"]["customers"], month_data["prior_rankings"]["customers"], month_data["customer_comparison"]):
+            detail_customers.update(item["name"] for item in group)
+    for period in ("1M", "YTD", "FULL"):
+        detail_customers.update(item["name"] for item in period_rankings[period]["customers"])
+        detail_customers.update(item["name"] for item in comparisons[period]["prior_rankings"]["customers"])
+        detail_customers.update(item["name"] for item in comparisons[period]["customer_comparison"])
+    return {
+        "as_of": as_of.isoformat(),
+        "source": "Dynamics GP SQL",
+        "company": "Structural Fab",
+        "source_database": DATABASE,
+        "source_object": SOURCE,
+        "returns_included": True,
+        "years": years,
+        "periods": {"1M": _totals(rolling), "YTD": _totals(ytd), "FULL": _totals(full)},
+        "comparisons": comparisons,
+        "monthly": monthly,
+        "months": months,
+        "rankings": period_rankings,
+        "salespeople": _rank(ytd, "salesperson"),
+        "branches": _rank(ytd, "location"),
+        "customers": _rank(ytd, "customer", 25),
+        "salesperson_details": _salesperson_details(transactions),
+        "customer_details": _customer_details(transactions, detail_customers),
+    }
+
+
+def build_open_orders(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    unique: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        sop = str(row.get("sop") or "").strip()
+        if sop:
+            unique[sop] = {
+                "sop": sop,
+                "salesperson": str(row.get("salesperson") or "Unassigned").strip() or "Unassigned",
+                "location": str(row.get("location") or "Unassigned").strip() or "Unassigned",
+                "amount": round(float(row.get("amount") or 0), 2),
+            }
+    orders = list(unique.values())
+    def group(key: str) -> list[dict[str, Any]]:
+        buckets: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in orders:
+            buckets[row[key]].append(row)
+        result = [{"name": name, "amount": round(sum(x["amount"] for x in vals), 2), "orders": len(vals)} for name, vals in buckets.items()]
+        return sorted(result, key=lambda x: (-x["amount"], x["name"]))
+    return {"amount": round(sum(r["amount"] for r in orders), 2), "orders": len(orders), "branches": group("location"), "salespeople": group("salesperson")}
+
+
+def extract() -> dict[str, Any]:
+    with connect() as connection:
+        cursor = connection.cursor()
+        cols = ["sop", "document_date", "customer", "salesperson", "location", "sales", "extended_cost", "kind"]
+        transaction_rows = [dict(zip(cols, row)) for row in cursor.execute(TRANSACTION_SQL).fetchall()]
+        order_cols = ["sop", "salesperson", "location", "amount"]
+        order_rows = [dict(zip(order_cols, row)) for row in cursor.execute(OPEN_ORDER_SQL).fetchall()]
+    snapshot = build_snapshot(transaction_rows)
+    snapshot["open_orders"] = build_open_orders(order_rows)
+    snapshot["refreshed_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+    canonical = json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode()
+    snapshot["sha256"] = hashlib.sha256(canonical).hexdigest()
+    return snapshot
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output", default="data/sales.json")
+    args = parser.parse_args()
+    snapshot = extract()
+    path = Path(args.output)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_suffix(path.suffix + ".tmp")
+    temp.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
+    temp.replace(path)
+    print(json.dumps({"output": str(path.resolve()), "as_of": snapshot["as_of"], "sha256": snapshot["sha256"], "ytd_sales": snapshot["periods"]["YTD"]["sales"], "open_orders": snapshot["open_orders"]["amount"]}, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
