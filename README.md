@@ -37,15 +37,16 @@ python -m http.server 8765 --bind 127.0.0.1
 
 Open `http://127.0.0.1:8765/`. Localhost reads `data/sales.json` directly. The snapshot and all credentials are ignored by Git.
 
-## Optional authenticated publishing
+## Authenticated publishing
 
-The included migrations define separate `sfab_sales_*` tables and RPCs. They have **not** been applied or published by this local build.
+The `sfab_sales_*` tables and RPCs are deployed in the shared business Supabase project. The hosted browser reads only `sfab_sales_current_snapshot()` after Supabase authentication. An hourly Hermes job extracts from read-only SQL, publishes, promotes, and verifies the current snapshot.
+
+Manual refresh:
 
 ```bash
+python scripts/sales_sync.py --output data/sales.json
 python scripts/publish_snapshot.py --snapshot data/sales.json --credentials "%LOCALAPPDATA%/hermes/arcrm/credentials/current-ar.json"
 ```
-
-A hosted browser reads only `sfab_sales_current_snapshot()` after Supabase authentication. Do not run publishing until the migrations have been reviewed and applied to the intended Supabase project.
 
 ## Tests
 
