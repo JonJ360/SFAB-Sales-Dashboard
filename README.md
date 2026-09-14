@@ -22,6 +22,8 @@ The source was cross-checked against the neighboring SMI AR CRM company configur
 - Profit = sales less guarded cost
 - Invoice count = distinct invoice SOP number
 - Open orders = remaining subtotal on normal, unposted orders
+- Tickets written today = distinct normal orders by GP `Created Date`, with `Subtotal` dollars
+- Invoices posted today = distinct normal posted invoices by GP `Posted Date`, with `Subtotal` dollars
 - Rolling 30 days (`1M`), YTD, selectable month, and overlapping 2024–2026 monthly columns
 - Prior-year comparison for rolling 30-day, YTD, selected month, and salesperson views
 - Click-through salesperson detail with net KPIs, monthly columns, YTD sales/profit total pies, and customer detail

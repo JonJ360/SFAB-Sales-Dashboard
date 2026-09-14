@@ -6,6 +6,8 @@ from scripts.sales_sync import (
     SERVER,
     SOURCE,
     TRANSACTION_SQL,
+    TODAY_ACTIVITY_SQL,
+    build_today_activity,
     build_snapshot,
     choose_period_start,
     normalize_invoice,
@@ -14,6 +16,21 @@ from scripts.sales_sync import (
 
 
 class SalesSyncTests(unittest.TestCase):
+    def test_today_activity_sql_uses_distinct_documents_and_separate_gp_dates(self):
+        self.assertIn("PARTITION BY [SOP Type], [SOP Number]", TODAY_ACTIVITY_SQL)
+        self.assertIn("sop_type = 'Order' AND created_date = CAST(GETDATE() AS date)", TODAY_ACTIVITY_SQL)
+        self.assertIn("sop_type = 'Invoice' AND posting_status = 'Posted'", TODAY_ACTIVITY_SQL)
+        self.assertIn("posted_date = CAST(GETDATE() AS date)", TODAY_ACTIVITY_SQL)
+        self.assertIn("CAST([Subtotal] AS decimal(19,2))", TODAY_ACTIVITY_SQL)
+
+    def test_today_activity_keeps_ticket_and_posted_invoice_counts_and_dollars(self):
+        activity = build_today_activity([
+            {"metric": "tickets", "count": 12, "amount": 3456.78},
+            {"metric": "invoices", "count": 7, "amount": 8901.23},
+        ])
+        self.assertEqual(activity["tickets"], {"count": 12, "amount": 3456.78})
+        self.assertEqual(activity["invoices"], {"count": 7, "amount": 8901.23})
+
     def test_reviewed_structural_fab_sql_source_is_pinned(self):
         self.assertEqual(SERVER, "192.168.1.25,49934")
         self.assertEqual(DATABASE, "SFAB")
