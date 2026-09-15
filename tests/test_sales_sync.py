@@ -1,6 +1,8 @@
 import datetime as dt
 import unittest
 
+import scripts.sales_sync as sales_sync
+
 from scripts.sales_sync import (
     DATABASE,
     SERVER,
@@ -30,6 +32,12 @@ class SalesSyncTests(unittest.TestCase):
         ])
         self.assertEqual(activity["tickets"], {"count": 12, "amount": 3456.78})
         self.assertEqual(activity["invoices"], {"count": 7, "amount": 8901.23})
+
+    def test_source_hash_ignores_refresh_timestamp(self):
+        first = {"company": "Structural Fab", "sales": 100, "refreshed_at": "2026-09-14T19:00:00+00:00"}
+        second = {**first, "refreshed_at": "2026-09-14T19:05:00+00:00"}
+
+        self.assertEqual(sales_sync.source_sha256(first), sales_sync.source_sha256(second))
 
     def test_reviewed_structural_fab_sql_source_is_pinned(self):
         self.assertEqual(SERVER, "192.168.1.25,49934")

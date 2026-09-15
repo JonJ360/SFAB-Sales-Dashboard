@@ -380,6 +380,12 @@ def build_today_activity(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
             }
     return activity
 
+
+def source_sha256(snapshot: dict[str, Any]) -> str:
+    source = {key: value for key, value in snapshot.items() if key not in {"refreshed_at", "sha256"}}
+    canonical = json.dumps(source, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(canonical).hexdigest()
+
 def extract() -> dict[str, Any]:
     with connect() as connection:
         cursor = connection.cursor()
@@ -393,8 +399,7 @@ def extract() -> dict[str, Any]:
     snapshot["open_orders"] = build_open_orders(order_rows)
     snapshot["today_activity"] = build_today_activity(activity_rows)
     snapshot["refreshed_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
-    canonical = json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode()
-    snapshot["sha256"] = hashlib.sha256(canonical).hexdigest()
+    snapshot["sha256"] = source_sha256(snapshot)
     return snapshot
 
 
