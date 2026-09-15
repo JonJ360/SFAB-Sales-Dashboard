@@ -52,6 +52,20 @@ class PublishSnapshotTests(unittest.TestCase):
         self.assertEqual(urlopen.call_count, 2)
         sleep.assert_called_once_with(2)
 
+    @mock.patch.object(publish_snapshot.time, "sleep")
+    @mock.patch.object(publish_snapshot.urllib.request, "urlopen")
+    def test_rpc_retries_transient_http_520(self, urlopen, sleep):
+        urlopen.side_effect = [
+            urllib.error.HTTPError("https://example.test", 520, "origin error", {}, io.BytesIO(b"error code: 520")),
+            _Response(44),
+        ]
+
+        result = publish_snapshot.rpc("https://example.test", "key", "token", "metadata", {})
+
+        self.assertEqual(result, 44)
+        self.assertEqual(urlopen.call_count, 2)
+        sleep.assert_called_once_with(2)
+
     @mock.patch.object(publish_snapshot, "load_credentials")
     @mock.patch.object(publish_snapshot, "rpc")
     def test_publish_skips_large_upload_when_source_is_unchanged(self, rpc, load_credentials):
