@@ -87,8 +87,14 @@ class FrontendContractTests(unittest.TestCase):
 
     def test_version_is_visible_beneath_top_left_brand_on_mobile_and_desktop(self):
         html = (ROOT / "index.html").read_text(encoding="utf-8")
-        self.assertIn('<div class="version">VERSION 1.1</div>', html)
+        self.assertIn('<div class="version">VERSION 1.2</div>', html)
         self.assertNotIn(".brand .eyebrow,.version,.side-foot{display:none}", html)
+
+    def test_rebar_has_independent_scope_and_retained_cost_policy(self):
+        html = (ROOT / "index.html").read_text(encoding="utf-8")
+        self.assertIn('updateReportScope()',html)
+        self.assertIn('10% of subtotal',html)
+        self.assertIn('rebar.js',html)
 
     def test_structural_fab_branding_is_visible(self):
         html = (ROOT / "index.html").read_text(encoding="utf-8")

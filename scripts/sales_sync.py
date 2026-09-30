@@ -387,6 +387,11 @@ def source_sha256(snapshot: dict[str, Any]) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 def extract() -> dict[str, Any]:
+    if __package__:
+        from .rebar import extract_rebar
+    else:
+        from rebar import extract_rebar
+    as_of = dt.date.today()
     with connect() as connection:
         cursor = connection.cursor()
         cols = ["sop", "document_date", "customer", "salesperson", "location", "sales", "extended_cost", "kind"]
@@ -395,7 +400,15 @@ def extract() -> dict[str, Any]:
         order_rows = [dict(zip(order_cols, row)) for row in cursor.execute(OPEN_ORDER_SQL).fetchall()]
         activity_cols = ["metric", "count", "amount"]
         activity_rows = [dict(zip(activity_cols, row)) for row in cursor.execute(TODAY_ACTIVITY_SQL).fetchall()]
-    snapshot = build_snapshot(transaction_rows)
+        try:
+            rebar = extract_rebar(connection, as_of)
+        except (ValueError, pyodbc.Error):
+            # New optional measure must not halt the established financial refresh.
+            # Never retain stale pounds or substitute zero on a source/validation failure.
+            rebar = None
+    snapshot = build_snapshot(transaction_rows, as_of)
+    snapshot["rebar"] = rebar
+    snapshot["rebar_status"] = "validated subset" if rebar is not None else "unavailable: source query or validation failed"
     snapshot["open_orders"] = build_open_orders(order_rows)
     snapshot["today_activity"] = build_today_activity(activity_rows)
     snapshot["refreshed_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
@@ -413,7 +426,13 @@ def main() -> int:
     temp = path.with_suffix(path.suffix + ".tmp")
     temp.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
     temp.replace(path)
-    print(json.dumps({"output": str(path.resolve()), "as_of": snapshot["as_of"], "sha256": snapshot["sha256"], "ytd_sales": snapshot["periods"]["YTD"]["sales"], "open_orders": snapshot["open_orders"]["amount"], "today_activity": snapshot["today_activity"]}, indent=2))
+    print(json.dumps({
+        "output": str(path.resolve()), "as_of": snapshot["as_of"],
+        "sha256": snapshot["sha256"], "rebar_status": snapshot["rebar_status"],
+        "ytd_sales": snapshot["periods"]["YTD"]["sales"],
+        "open_orders": snapshot["open_orders"]["amount"],
+        "today_activity": snapshot["today_activity"],
+    }, indent=2))
     return 0
 
 
