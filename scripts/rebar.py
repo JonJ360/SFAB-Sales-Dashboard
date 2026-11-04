@@ -134,11 +134,13 @@ def validated_pounds(row, uoms):
 
 def aggregate_monthly(lines, uoms, as_of):
     buckets, coverage, seen = {}, {}, set()
+    fiberglass = {}
     for year in range(2024, as_of.year + 1):
         for month in range(1,13):
             period = f'{year}-{month:02d}'
             if period > as_of.isoformat()[:7]: continue
-            coverage[period] = dict(period=period, candidate_count=0, validated_count=0, unknown_count=0, excluded_count=0)
+            coverage[period] = dict(period=period, candidate_count=0, validated_count=0, unknown_count=0, excluded_count=0, classified_count=0)
+            fiberglass[period] = dict(period=period, sold_each=Decimal(0), returned_each=Decimal(0), gross_sales=Decimal(0), return_sales=Decimal(0), net_lbs=None)
             for group in GROUPS:
                 buckets[period,group] = dict(period=period, group=group,
                     sold_lbs=Decimal(0), returned_lbs=Decimal(0),
@@ -157,6 +159,36 @@ def aggregate_monthly(lines, uoms, as_of):
         exact_hash = hashlib.sha256((r['item'] + '\0' + (r.get('description') or '')).encode()).hexdigest()
         if item_hash in ITEM_EXCLUSIONS or exact_hash in EXACT_ITEM_DESCRIPTION_EXCLUSIONS:
             c['excluded_count'] += 1
+            continue
+        if r['item'] == 'RAVEN 1/2':
+            quantity, sales = decimal(r.get('QUANTITY')), decimal(r.get('XTNDPRCE'))
+            matches = [u for u in uoms if u.get('item') == r['item'] and u.get('schedule') == 'EA' and u.get('uom') == 'EA']
+            trusted = (r.get('SOPTYPE') in (3,4) and r.get('VOIDSTTS') == 0
+                and r.get('PSTGSTUS') == 2 and r.get('CMPNTSEQ') == 0
+                and r.get('schedule') == 'EA' and r.get('uom') == 'EA'
+                and decimal(r.get('QTYBSUOM')) == 1 and quantity is not None and quantity >= 0
+                and sales is not None and len(matches) == 1
+                and matches[0].get('equivalent_uom') == 'EA'
+                and decimal(matches[0].get('base_quantity')) == 1
+                and decimal(matches[0].get('equivalent_quantity')) == 1)
+            if trusted:
+                c['classified_count'] += 1
+                f = fiberglass[period]
+                f['sold_each' if r['SOPTYPE'] == 3 else 'returned_each'] += quantity
+                f['gross_sales' if r['SOPTYPE'] == 3 else 'return_sales'] += abs(sales)
+                weight = decimal(matches[0].get('shipping_weight'))
+                # Only the approved SFAB TRUE 1/2 identity and reviewed 360 hundredths basis.
+                if weight == 360 and (r.get('shipping_weight') is None or decimal(r.get('shipping_weight')) == weight):
+                    for k in ('sold_lbs','returned_lbs'):
+                        if k not in f: f[k] = Decimal(0)
+                    if not f.get('weight_unavailable'):
+                        f['sold_lbs' if r['SOPTYPE'] == 3 else 'returned_lbs'] += quantity * weight / Decimal(100)
+                else:
+                    f['weight_unavailable'] = True
+                    f['sold_lbs'] = f['returned_lbs'] = None
+            else:
+                c['unknown_count'] += 1
+                fiberglass[period]['untrusted'] = True
             continue
         mapped = ITEM_MAP.get(item_hash)
         value = validated_pounds(r,uoms) if mapped else None
@@ -184,7 +216,23 @@ def aggregate_monthly(lines, uoms, as_of):
         b['net_lbs'] = None if b['sold_lbs'] is None or b['returned_lbs'] is None else b['sold_lbs']-b['returned_lbs']
         for key in ('sold_lbs','returned_lbs','net_lbs','prepaid_sold_lbs','prepaid_returned_lbs'):
             b[key] = None if b[key] is None else str(b[key])
+    for f in fiberglass.values():
+        f.setdefault('sold_lbs', None)
+        f.setdefault('returned_lbs', None)
+        f.pop('weight_unavailable', None)
+        f['net_lbs'] = None if f['sold_lbs'] is None or f['returned_lbs'] is None else f['sold_lbs'] - f['returned_lbs']
+        for key in ('sold_lbs','returned_lbs','net_lbs'):
+            f[key] = None if f[key] is None else str(f[key])
+        f['net_each'] = f['sold_each'] - f['returned_each']
+        f['net_sales'] = f['gross_sales'] - f['return_sales']
+        for key in ('sold_each','returned_each','net_each','gross_sales','return_sales','net_sales'):
+            f[key] = str(f[key])
+        if f.pop('untrusted', False):
+            for key in ('sold_each','returned_each','net_each','gross_sales','return_sales','net_sales','sold_lbs','returned_lbs','net_lbs'):
+                f[key] = None
     return dict(monthly=list(buckets.values()), coverage=list(coverage.values()),
+        classified_count=sum(c['classified_count'] for c in coverage.values()),
+        fiberglass=dict(monthly=list(fiberglass.values()), unit='EA', pounds_status='CURRENT GP ITEM MASTER weight basis: approved SFAB TRUE 1/2, ITEMSHWT 360 / 100 = 3.60 lb/EA; not measured shipment weight. Unsupported or conflicting weights unavailable.'),
         candidate_count=len(seen), validated_count=sum(c['validated_count'] for c in coverage.values()),
         unknown_count=sum(c['unknown_count'] for c in coverage.values()),
         excluded_count=sum(c['excluded_count'] for c in coverage.values()),
