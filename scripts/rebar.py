@@ -103,6 +103,10 @@ ITEM_MAP = {'053312bf4f1b41069860632e881df96c4ac14d0527e8853453d3ca8fb45ce96f': 
  'ffa6ea2c97578bfc1f1564e4d55b9c3d57660377f9de39bbdfb046fe15adb784': {'group': 'Fabricated rebar',
                                                                       'prepaid': True}}
 
+# Reviewed identities only; exact descriptions use SHA256(item + NUL + description).
+ITEM_EXCLUSIONS = {'dde0636ff6d6f8bbcd0f12f5d3b3d0f88ab93b2127a25c013c688afdbc969192': 'Verified item master SAWING CHARGE, ITEMTYPE4 LABOR; service line is not product pounds', 'fd6d558c4513b7f822b0e5ade32ca136b56c62c0396c08d7a86515057cdd58b0': 'A36 smooth round merchant steel, outside deformed rebar/coils stock-length groups', '3207ab7e8002d05f9b5d612aacf90b914a3bca603a95213127d1d3f81c62d714': 'A36 smooth round merchant steel, outside deformed rebar/coils stock-length groups', '72083ba9784d63730e75d3dc92cc18e1611b6a04331594b2500945b695934b33': 'A36 smooth round merchant steel, outside deformed rebar/coils stock-length groups', 'ec36918b63db1dd18ac3b8d238a0c0fb1704b6250d49008bf60fc41dde8d5ca1': 'A36 smooth round merchant steel, outside deformed rebar/coils stock-length groups'}
+EXACT_ITEM_DESCRIPTION_EXCLUSIONS = {'893f3b6b5259cf35fd473e28326399fa2c9e08e26a353b11f2ce8c3bd216a5fb': 'Verified item master SAWING CHARGE, ITEMTYPE4 LABOR; service line is not product pounds', '795ed96185da910f2c02289c4f98c5d96d30ea2466d1acceb6f71d1dc36f7777': 'Verified item master SAWING CHARGE, ITEMTYPE4 LABOR; service line is not product pounds', '56ee261926f626b5e50809a0ef3ebdca6ba0896283f49eebfcc89d5350772924': 'Reviewed line is beam, mesh, coupler, smooth dowel, tie rod package, restocking fee or price-only reconciliation; not 20ft/40ft/coil rebar', '3e878848271ffcaa96c09d172d4295c4611a57f99b3b6d33379a0f08e3600ec7': 'Reviewed line is beam, mesh, coupler, smooth dowel, tie rod package, restocking fee or price-only reconciliation; not 20ft/40ft/coil rebar', '6d8bfe7cffb46a923e29b4ef059d1c4c8693c2f14e64e7e7936e9f7a6b4d35c2': 'Reviewed line is beam, mesh, coupler, smooth dowel, tie rod package, restocking fee or price-only reconciliation; not 20ft/40ft/coil rebar', 'eecd328996e06d350d07bebc3147808a17ff28f5d506d73b26e73ffe8485e222': 'Reviewed line is beam, mesh, coupler, smooth dowel, tie rod package, restocking fee or price-only reconciliation; not 20ft/40ft/coil rebar', '5cd9ec6c830d00ef8ed400fd8d8a5e3369a66d954a75c4c9a25c85897f0506f4': 'Reviewed line is beam, mesh, coupler, smooth dowel, tie rod package, restocking fee or price-only reconciliation; not 20ft/40ft/coil rebar', 'eac4e54a8774bee24ff7347ea2a3cc232e3db2059daafaf8fd0e07932b2840b4': 'Reviewed line is beam, mesh, coupler, smooth dowel, tie rod package, restocking fee or price-only reconciliation; not 20ft/40ft/coil rebar', '3ae1667d0840130a2de9cef6e0a32dfd15f5f10d2efe44f18e31325cbe4b649b': 'Reviewed line is beam, mesh, coupler, smooth dowel, tie rod package, restocking fee or price-only reconciliation; not 20ft/40ft/coil rebar', 'd40f8299952a61b168ff1c2ad8564b94fa6caa2a673a0191376cefe92809e4fe': 'Reviewed line is beam, mesh, coupler, smooth dowel, tie rod package, restocking fee or price-only reconciliation; not 20ft/40ft/coil rebar', 'f82568858a4b8c1cf2d5d3b0c56570e0fbe6000def7a016240b5349c14fc6bb3': 'Verified item master SAWING CHARGE, ITEMTYPE4 LABOR; service line is not product pounds', 'af0b801642d38495abfe34650a0bc5da49fb302218a9d2aab44bb00869136d79': 'Reviewed line is beam, mesh, coupler, smooth dowel, tie rod package, restocking fee or price-only reconciliation; not 20ft/40ft/coil rebar', 'c311c607fbacb0e7c4f9404e36b47201e4ce4a241e15ddb63caa65a81c498ff1': 'Reviewed line is beam, mesh, coupler, smooth dowel, tie rod package, restocking fee or price-only reconciliation; not 20ft/40ft/coil rebar', 'f8fe1b7973a5bab80abc222bd24e4d2415c92a6db425d35cfa96b073869a72ce': 'Reviewed line is beam, mesh, coupler, smooth dowel, tie rod package, restocking fee or price-only reconciliation; not 20ft/40ft/coil rebar', '6b93a8fa287a839e42446aaf7d63b2e2646d0eb93a1b48626724e177d6bf78f3': 'Reviewed line is beam, mesh, coupler, smooth dowel, tie rod package, restocking fee or price-only reconciliation; not 20ft/40ft/coil rebar', '8dd83232ccd19fdee5ec61f64de1063d1f4ad2702a82f46dbac2b86e241e09ad': 'Financial credit; no product pounds evidenced'}
+
 def decimal(value):
     try:
         d = Decimal(str(value))
@@ -134,7 +138,7 @@ def aggregate_monthly(lines, uoms, as_of):
         for month in range(1,13):
             period = f'{year}-{month:02d}'
             if period > as_of.isoformat()[:7]: continue
-            coverage[period] = dict(period=period, candidate_count=0, validated_count=0, unknown_count=0)
+            coverage[period] = dict(period=period, candidate_count=0, validated_count=0, unknown_count=0, excluded_count=0)
             for group in GROUPS:
                 buckets[period,group] = dict(period=period, group=group,
                     sold_lbs=Decimal(0), returned_lbs=Decimal(0),
@@ -149,7 +153,12 @@ def aggregate_monthly(lines, uoms, as_of):
         if not dt.date(2024,1,1) <= date <= as_of: raise ValueError('Source outside report window')
         period = date.isoformat()[:7]
         c = coverage[period]; c['candidate_count'] += 1
-        mapped = ITEM_MAP.get(hashlib.sha256(r['item'].encode()).hexdigest())
+        item_hash = hashlib.sha256(r['item'].encode()).hexdigest()
+        exact_hash = hashlib.sha256((r['item'] + '\0' + (r.get('description') or '')).encode()).hexdigest()
+        if item_hash in ITEM_EXCLUSIONS or exact_hash in EXACT_ITEM_DESCRIPTION_EXCLUSIONS:
+            c['excluded_count'] += 1
+            continue
+        mapped = ITEM_MAP.get(item_hash)
         value = validated_pounds(r,uoms) if mapped else None
         if value is None:
             c['unknown_count'] += 1
@@ -165,6 +174,7 @@ def aggregate_monthly(lines, uoms, as_of):
         c = coverage[b['period']]
         b['candidate_count_month'] = c['candidate_count']
         b['unknown_count_month'] = c['unknown_count']
+        b['excluded_count_month'] = c['excluded_count']
         for kind in ('sold','returned'):
             # Unknown candidate membership cannot be attributed to either group.
             # Do not fabricate zero where no valid observation supports a measure.
@@ -177,9 +187,10 @@ def aggregate_monthly(lines, uoms, as_of):
     return dict(monthly=list(buckets.values()), coverage=list(coverage.values()),
         candidate_count=len(seen), validated_count=sum(c['validated_count'] for c in coverage.values()),
         unknown_count=sum(c['unknown_count'] for c in coverage.values()),
+        excluded_count=sum(c['excluded_count'] for c in coverage.values()),
         status='validated subset; not complete rebar totals',
         basis='SFAB posted nonvoid historical invoices/returns, Document Date, parent lines, direct LBS only. Sold and returned are positive magnitudes; net is sold less returned.',
-        coverage_warning='Rebar-name/class and coil candidates only. Unknown units/items remain unavailable. Item identity mapping is stock-length based, not finished cut length. Current item/UOM master corroborates transaction LBS; historical master changes are not reconstructed.',
+        coverage_warning='Reviewed non-rebar/financial line exclusions are counted separately; excluded lines are not unknown pounds. Rebar-name/class and coil candidates only. Unknown units/items remain unavailable. Item identity mapping is stock-length based, not finished cut length. Current item/UOM master corroborates transaction LBS; historical master changes are not reconstructed.',
         prepaid_policy='Prepaid mapped items included; bridge is part of each total, not additional pounds. No Anthony-equivalent or ton-conversion claim.',
         start='2024-01-01', through=as_of.isoformat())
 
