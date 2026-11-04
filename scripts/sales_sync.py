@@ -162,7 +162,7 @@ def normalize_transaction(row: Mapping[str, Any]) -> dict[str, Any]:
     sales_magnitude = abs(round(float(row.get("sales") or 0), 2))
     raw_cost_value = row.get("extended_cost") if row.get("extended_cost") is not None else row.get("cost")
     raw_cost = abs(float(raw_cost_value or 0))
-    cost_magnitude = sales_magnitude * 0.10 if raw_cost > sales_magnitude else raw_cost
+    cost_magnitude = raw_cost
     sales = sign * sales_magnitude
     cost = sign * round(cost_magnitude, 2)
     return {
@@ -334,6 +334,14 @@ def build_snapshot(rows: Iterable[Mapping[str, Any]], as_of: dt.date | None = No
         "source_database": DATABASE,
         "source_object": SOURCE,
         "returns_included": True,
+        "cost_policy": "Posted GP invoice/return costs; existing magnitude, return sign and cent rounding retained. Freight and other GL costs outside these documents are not included; GL reconciliation is separate.",
+        "cost_exceptions": [
+            {"document": r["sop"], "customer": r["customer"], "date": r["date"].isoformat(),
+             "sales": r["sales"], "posted_cost": r["cost"], "profit": r["profit"],
+             "kind": r["kind"], "anomaly": "source_cost_exceeds_sales"}
+            for r in sorted(transactions, key=lambda r: (r["date"], r["sop"], r["kind"]))
+            if abs(r["cost"]) > abs(r["sales"])
+        ],
         "years": years,
         "periods": {"1M": _totals(rolling), "YTD": _totals(ytd), "FULL": _totals(full)},
         "comparisons": comparisons,

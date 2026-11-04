@@ -11,7 +11,7 @@ This extends the existing authenticated SFAB snapshot; it is not a static data e
 - History starts 2024-01-01 through the source as-of date. Source-line identities must be unique; cap or validation failures cannot yield truncated totals. Partial current months are only through the displayed as-of date.
 - Decimal strings preserve exact numeric detail in the table and CSV; Chart.js numeric values are visualization only.
 - Financial YTD/month controls do not scope rebar; its explicit year selector does. Existing reports, hosted Auth/RPC loading and refresh behavior are preserved.
-- SFAB retains its own absolute-header-cost policy (cost above subtotal replaced with 10% of subtotal). This is not SMI cost policy or GL net income.
+- Superseded in v1.3: SFAB now retains posted GP invoice/return costs with existing magnitude, return sign and rounding. Cost anomalies are review flags, not substitutions. Freight/other GL reconciliation remains separate; not GL net income.
 
 ## Runtime and failure behavior
 

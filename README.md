@@ -18,8 +18,9 @@ The source was cross-checked against the neighboring SMI AR CRM company configur
 
 - Posted, normal invoices and returns
 - Net sales = invoice `Subtotal` less return `Subtotal`
-- Cost guard = 10% of sales when source extended cost exceeds sales
-- Profit = sales less guarded cost
+- Cost policy (v1.3) = posted GP invoice/return cost, retaining existing magnitude, return sign and cent rounding; no substitution
+- Profit = sales less posted cost. Freight and other GL costs outside these documents are not included; reconcile GL separately.
+- `cost_exceptions` = deterministic typed source anomalies where posted-cost magnitude exceeds sales magnitude, including zero-sale positive costs and returns; review flag, not a business-error verdict. Selected financial period controls filter the collapsible table.
 - Invoice count = distinct invoice SOP number
 - Open orders = remaining subtotal on normal, unposted orders
 - Tickets written today = distinct normal orders by GP `Created Date`, with `Subtotal` dollars

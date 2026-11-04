@@ -51,11 +51,30 @@ class SalesSyncTests(unittest.TestCase):
     def test_ytd_period_starts_january_first(self):
         self.assertEqual(choose_period_start("YTD", dt.date(2026, 9, 13)), dt.date(2026, 1, 1))
 
-    def test_cost_guard_matches_power_bi_rule(self):
-        row = {"sop":"INV1","date":dt.date(2026, 9, 1),"customer":"ACME","salesperson":"RICK","location":"FARGO","sales":100.0,"extended_cost":140.0}
-        normalized = normalize_invoice(row)
-        self.assertEqual(normalized["cost"], 10.0)
-        self.assertEqual(normalized["profit"], 90.0)
+    def test_posted_cost_replaces_legacy_guard_without_changing_sign_or_rounding(self):
+        for sales, cost, kind, expected_cost, profit in [
+            (0, 10202.29, 'Invoice', 10202.29, -10202.29),
+            (100, 150, 'Invoice', 150, -50),
+            (-100, -150, 'Return', -150, 50),
+            (100, 60.126, 'Invoice', 60.13, 39.87),
+        ]:
+            with self.subTest(sales=sales, kind=kind):
+                row = normalize_transaction(dict(sop='I', date='2026-10-01', sales=sales, extended_cost=cost, kind=kind))
+                self.assertEqual(row['cost'], expected_cost)
+                self.assertEqual(row['profit'], profit)
+
+    def test_cost_exceptions_are_typed_deterministic_source_anomalies(self):
+        rows = [dict(sop=sop, date=date, sales=sales, extended_cost=cost, kind=kind, customer='<A>') for sop,date,sales,cost,kind in [
+            ('Z','2026-10-01',0,10202.29,'Invoice'), ('R','2026-10-01',100,150,'Return'),
+            ('N','2026-10-02',100,60,'Invoice'), ('OLD','2025-10-01',100,150,'Invoice')]]
+        snap = build_snapshot(rows, dt.date(2026,11,4))
+        exceptions = snap['cost_exceptions']
+        self.assertEqual(exceptions, build_snapshot(reversed(rows), dt.date(2026,11,4))['cost_exceptions'])
+        self.assertEqual([e['document'] for e in exceptions], ['OLD','R','Z'])
+        self.assertEqual(exceptions[-1], dict(document='Z',customer='<A>',date='2026-10-01',sales=0.0,posted_cost=10202.29,profit=-10202.29,kind='Invoice',anomaly='source_cost_exceeds_sales'))
+        self.assertEqual(exceptions[1]['posted_cost'], -150)
+        self.assertIn('freight', snap['cost_policy'].lower())
+        self.assertIn('posted', snap['cost_policy'].lower())
 
     def test_snapshot_counts_unique_invoices(self):
         rows = [

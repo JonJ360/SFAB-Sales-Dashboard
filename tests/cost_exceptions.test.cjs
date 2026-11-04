@@ -1,0 +1,10 @@
+const {test}=require('node:test');
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const vm=require('node:vm');
+const html=fs.readFileSync('index.html','utf8');
+function context(){const c={};vm.createContext(c); for(const name of ['scopedCostExceptions','costExceptionRows']){const source=html.split('\n').find(l=>l.startsWith(`function ${name}(`));assert.ok(source,`${name} exists`);vm.runInContext(source,c);}return c;}
+test('exceptions obey generic month YTD rolling and full scopes',()=>{const c=context(),rows=[{date:'2025-10-01'},{date:'2026-09-01'},{date:'2026-10-01'},{date:'2026-12-01'}];assert.equal(c.scopedCostExceptions(rows,'MONTH','2026-10','2026-11-04').length,1);assert.equal(c.scopedCostExceptions(rows,'YTD','','2026-11-04').length,2);assert.equal(c.scopedCostExceptions(rows,'1M','','2026-11-04').length,0);assert.equal(c.scopedCostExceptions(rows,'FULL','','2026-11-04').length,3);});
+test('rolling boundaries match inclusive financial 30-day window',()=>{const c=context(),rows=[{date:'2026-10-05'},{date:'2026-10-06'},{date:'2026-11-04'},{date:'2026-11-05'}];assert.equal(JSON.stringify(c.scopedCostExceptions(rows,'1M','','2026-11-04')),JSON.stringify([rows[1],rows[2]]));});
+test('table escapes every source string and retains cents and return label',()=>{const c=context();vm.runInContext(html.split('\n').find(l=>l.startsWith('const esc=')),c);const result=c.costExceptionRows([{document:'<img>',customer:'"&',date:'<date>',kind:'Return',sales:-100,posted_cost:-150,profit:50}]);assert.ok(!result.includes('<img>'));assert.ok(result.includes('&lt;img&gt;'));assert.ok(result.includes('&lt;date&gt;'));assert.ok(result.includes('&quot;&amp;'));assert.ok(result.includes('Return'));assert.ok(result.includes('150.00'));});
+test('collapsible visible table and policy version contract',()=>{assert.match(html,/<details[^>]*id="costExceptions"/);assert.match(html,/VERSION 1\.3/);assert.match(html,/Source anomaly.*not a business-error verdict/);assert.ok(html.includes('renderCostExceptions();'));assert.ok(!html.includes('10% of subtotal'));});
