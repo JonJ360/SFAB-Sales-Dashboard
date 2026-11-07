@@ -1,0 +1,1 @@
+(function(root){const config={"company": "Structural Fab", "blue": "#2E6FD9", "navy": "#233B61"};if(typeof module!=='undefined'&&module.exports)module.exports=config;else root.MonthlyReportConfig=config;})(typeof window!=='undefined'?window:globalThis);
